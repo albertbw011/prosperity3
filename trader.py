@@ -4,11 +4,14 @@ import string
 
 class Trader:
     
+    position_limits = {"RAINFOREST_RESION": 50, "KELP": 50, "SQUID_INK": 50}
+    positions = {"RAINFOREST_RESION": 0, "KELP": 0, "SQUID_INK": 0}
+    
     def run(self, state: TradingState):
         print("traderData: " + state.traderData)
         print("Observations: " + str(state.observations))
 
-				# Orders to be placed on exchange matching engine
+		# Orders to be placed on exchange matching engine
         result = {}
         for product in state.order_depths:
             order_depth: OrderDepth = state.order_depths[product]
