@@ -314,8 +314,6 @@ class Trader:
         return buy_volume, sell_volume
     
     def run(self, state: TradingState):
-        print("traderData: " + state.traderData)
-        print("Observations: " + str(state.observations))
 
 		# Orders to be placed on exchange matching engine
         result = {}
@@ -335,15 +333,16 @@ class Trader:
                     if self.positions[product] < self.position_limits[product]:
                         if int(best_ask) < acceptable_price:
                             buy_amount = min(self.position_limits[product] - self.positions[product],-best_ask_amount)
-                            logger.print("BUY", str(buy_amount) + "x", best_ask)
+                            logger.print("BUY RAINFOREST_RESIN", str(buy_amount) + "x", best_ask)
                             orders.append(Order(product,best_ask,buy_amount))
                             self.positions[product] += buy_amount
+                            #logger.print(self.positions[product], state.position.get(product,0)) #TESTING IF POSITION ARE UPDATED IMMEDIATELY, TRADES EXECUTING IMMEDIATELY ::: CONFIRMED STATE.POSITIONS UPDATED
                             bought_amount += buy_amount
                             if buy_amount == -best_ask_amount:
                                 best_ask, best_ask_amount = list(order_depth.sell_orders.items())[1]
                         if int(best_ask) == acceptable_price and self.positions[product] < 0:
                             buy_amount = min(-self.positions[product],-best_ask_amount)
-                            print("BUY", str(buy_amount) + "x", best_ask)
+                            logger.print("BUY RAINFOREST_RESIN", str(buy_amount) + "x", best_ask)
                             orders.append(Order(product,best_ask,buy_amount))
                             self.positions[product] += buy_amount
                             bought_amount += buy_amount
@@ -354,7 +353,7 @@ class Trader:
                     if self.positions[product] > -self.position_limits[product]:
                         if int(best_bid) > acceptable_price:
                             sell_amount = min(self.positions[product] + self.position_limits[product], best_bid_amount)
-                            logger.print("SELL", str(sell_amount) + "x", best_bid)
+                            logger.print("SELL RAINFOREST_RESIN", str(sell_amount) + "x", best_bid)
                             orders.append(Order(product,best_bid,-sell_amount))
                             self.positions[product] -= sell_amount
                             sold_amount -= sell_amount
@@ -362,17 +361,62 @@ class Trader:
                                 best_bid, best_bid_amount = list(order_depth.buy_orders.items())[1]
                         if int(best_bid) == acceptable_price and self.positions[product] > 0:
                             sell_amount = min(self.positions[product],best_bid_amount)
-                            logger.print("SELL", str(sell_amount) + "x", best_bid)
+                            logger.print("SELL RAINFOREST_RESIN", str(sell_amount) + "x", best_bid)
                             orders.append(Order(product,best_bid,-sell_amount))
                             self.positions[product] -= sell_amount
                             sold_amount -= sell_amount
                 
                 left_to_sell = sold_amount - sell_limit #positive number
                 left_to_buy = buy_limit - bought_amount 
+                
+                
+                # Calculate current spread
+                """current_spread = best_ask - best_bid
 
-                logger.print("MAKING BUY", str(left_to_buy) + "x", best_bid+1)
+                # Set minimum spread to maintain
+                min_spread = 2  # Based on observed minimum spread in the market
+
+                # Determine how much to improve prices based on current spread
+                if current_spread <= min_spread + 2:  # If spread is tight (≤4)
+                    bid_improvement = 0  # Don't improve the bid
+                    ask_improvement = 0  # Don't improve the ask
+                else:  
+                    bid_improvement = 1  # Standard improvement
+                    ask_improvement = 1  # Standard improvement
+
+                # Calculate base prices with dynamic improvements
+                base_buy_price = best_bid + bid_improvement
+                base_sell_price = best_ask - ask_improvement
+
+                # Calculate position ratio (between -1 and 1)
+                inventory_ratio = self.positions[product] / self.position_limits[product]
+
+                # Mild position-based adjustments due to strong mean reversion
+                # Only adjust by at most 1 additional tick when approaching limits
+                adjustment_factor = 0.2  # Very mild adjustments due to strong mean reversion
+
+                if inventory_ratio > 0:
+                    # When long, be slightly more aggressive selling
+                    sell_adjustment = round(inventory_ratio * adjustment_factor * current_spread)
+                    # Ensure we maintain minimum spread and don't cross market
+                    sell_price = max(base_buy_price + min_spread, base_sell_price - sell_adjustment)
+                else:
+                    sell_price = base_sell_price
+
+                if inventory_ratio < 0:
+                    # When short, be slightly more aggressive buying
+                    buy_adjustment = round(abs(inventory_ratio) * adjustment_factor * current_spread)
+                    # Ensure we maintain minimum spread and don't cross market
+                    buy_price = min(base_sell_price - min_spread, base_buy_price + buy_adjustment)
+                else:
+                    buy_price = base_buy_price
+                    
+                orders.append(Order(product, buy_price, left_to_buy))
+                orders.append(Order(product, sell_price, -left_to_sell))"""
+                
+                logger.print("MAKING RAINFOREST_RESIN BUY", str(left_to_buy) + "x", best_bid+1)
                 orders.append(Order(product,best_bid+1,left_to_buy))
-                logger.print("MAKING SELL", str(left_to_sell) + "x", best_ask-1)
+                logger.print("MAKING RAINFOREST_RESIN SELL", str(left_to_sell) + "x", best_ask-1)
                 orders.append(Order(product,best_ask-1,-left_to_sell))
                 
                             
@@ -380,10 +424,10 @@ class Trader:
             
             elif product == "KELP":
                 fair_value = self.calculate_kelp_price(order_depth)
-                
+                logger.print("Fair value: " + str(fair_value))
                 if fair_value is not None:
                     # Initialize tracking variables
-                    position = self.positions[product]
+                    position = state.position.get(product,0)
                     position_limit = self.position_limits[product]
                     buy_limit = position_limit - position
                     sell_limit = -position_limit - position  # negative limit
@@ -391,52 +435,103 @@ class Trader:
                     
                     # Market taking - sell side (buying)
                     if len(order_depth.sell_orders) != 0:
-                        best_ask = min(order_depth.sell_orders.keys())
-                        best_ask_amount = -order_depth.sell_orders[best_ask]
+                        best_ask, best_ask_amount = list(order_depth.sell_orders.items())[0]
                         
                         # Check if we can buy at favorable price
-                        if best_ask < fair_value - self.params[product]["take_width"]:
-                            # Check adverse selection if enabled
-                            if not self.params[product]["prevent_adverse"] or best_ask_amount <= self.params[product]["adverse_volume"]:
-                                buy_amount = min(position_limit - position, best_ask_amount)
-                                if buy_amount > 0:
-                                    orders.append(Order(product, best_ask, buy_amount))
-                                    self.positions[product] += buy_amount
-                                    bought_amount += buy_amount
+                        if position < self.position_limits[product] and best_ask < fair_value:
+                            buy_amount = min(position_limit - position, -best_ask_amount)
+                            orders.append(Order(product, best_ask, buy_amount))
+                            logger.print("BUY KELP", str(buy_amount) + "x", best_ask)
+                            position += buy_amount
+                            bought_amount += buy_amount
+                            if buy_amount == -best_ask_amount and len(order_depth.sell_orders) > 1:
+                                best_ask, best_ask_amount = list(order_depth.sell_orders.items())[1]    
                     
                     # Market taking - buy side (selling)
                     if len(order_depth.buy_orders) != 0:
-                        best_bid = max(order_depth.buy_orders.keys())
-                        best_bid_amount = order_depth.buy_orders[best_bid]
+                        best_bid, best_bid_amount = list(order_depth.buy_orders.items())[0]
                         
                         # Check if we can sell at favorable price
-                        if best_bid > fair_value + self.params[product]["take_width"]:
-                            # Check adverse selection if enabled
-                            if not self.params[product]["prevent_adverse"] or best_bid_amount <= self.params[product]["adverse_volume"]:
-                                sell_amount = min(position + position_limit, best_bid_amount)
-                                if sell_amount > 0:
-                                    orders.append(Order(product, best_bid, -sell_amount))
-                                    self.positions[product] -= sell_amount
-                                    sold_amount += sell_amount
+                        if position > -self.position_limits[product] and best_bid > fair_value:
+                            sell_amount = min(position + position_limit, best_bid_amount)
+                            logger.print("SELL KELP", str(sell_amount) + "x", best_bid)
+                            orders.append(Order(product, best_bid, -sell_amount))
+                            position -= sell_amount
+                            sold_amount -= sell_amount
+                            if sell_amount == best_bid_amount and len(order_depth.buy_orders) > 1:
+                                best_bid, best_bid_amount = list(order_depth.buy_orders.items())[1]
                     
                     # Market making
                     if len(order_depth.sell_orders) != 0 and len(order_depth.buy_orders) != 0:
-                        best_ask = min(order_depth.sell_orders.keys())
-                        best_bid = max(order_depth.buy_orders.keys())
-                        
-                        # Calculate remaining capacity
-                        left_to_buy = buy_limit - bought_amount
-                        left_to_sell = sell_limit + sold_amount  # Convert to positive number
-                        
-                        # Make market on both sides
-                        if left_to_buy > 0:
-                            orders.append(Order(product, best_bid + 1, left_to_buy))
-                        
-                        if left_to_sell > 0:
-                            orders.append(Order(product, best_ask - 1, -left_to_sell))
-                    
+                        if best_ask - 1 > best_bid + 1:
+                            # Calculate remaining capacity
+                            left_to_buy = buy_limit - bought_amount
+                            left_to_sell = sold_amount - sell_limit
+                            
+                            # Make market on both sides
+                            if left_to_buy > 0:
+                                orders.append(Order(product, best_bid + 1, left_to_buy))
+                                logger.print("MAKING KELP BUY", str(left_to_buy) + "x", best_bid+1)
+                            if left_to_sell > 0:
+                                orders.append(Order(product, best_ask - 1, -left_to_sell))
+                                logger.print("MAKING KELP SELL", str(left_to_sell) + "x", best_ask-1)
                     # Add orders to result
                     result[product] = orders
+            elif product == "SQUID_INK":
+                fair_value = self.calculate_kelp_price(order_depth)
+                if fair_value is not None:
+                    # Initialize tracking variables
+                    position = state.position.get(product,0)
+                    position_limit = self.position_limits[product]
+                    buy_limit = position_limit - position
+                    sell_limit = -position_limit - position  # negative limit
+                    bought_amount, sold_amount = 0, 0
+                    
+                    # Market taking - sell side (buying)
+                    if len(order_depth.sell_orders) != 0:
+                        best_ask, best_ask_amount = list(order_depth.sell_orders.items())[0]
+                        
+                        # Check if we can buy at favorable price
+                        if position < self.position_limits[product] and best_ask < fair_value:
+                            buy_amount = min(position_limit - position, -best_ask_amount)
+                            orders.append(Order(product, best_ask, buy_amount))
+                            logger.print("BUY INK", str(buy_amount) + "x", best_ask)
+                            position += buy_amount
+                            bought_amount += buy_amount
+                            if buy_amount == -best_ask_amount and len(order_depth.sell_orders) > 1:
+                                best_ask, best_ask_amount = list(order_depth.sell_orders.items())[1]    
+                    
+                    # Market taking - buy side (selling)
+                    if len(order_depth.buy_orders) != 0:
+                        best_bid, best_bid_amount = list(order_depth.buy_orders.items())[0]
+                        
+                        # Check if we can sell at favorable price
+                        if position > -self.position_limits[product] and best_bid > fair_value:
+                            sell_amount = min(position + position_limit, best_bid_amount)
+                            logger.print("SELL INK", str(sell_amount) + "x", best_bid)
+                            orders.append(Order(product, best_bid, -sell_amount))
+                            position -= sell_amount
+                            sold_amount -= sell_amount
+                            if sell_amount == best_bid_amount and len(order_depth.buy_orders) > 1:
+                                best_bid, best_bid_amount = list(order_depth.buy_orders.items())[1]
+                    
+                    # Market making
+                    if len(order_depth.sell_orders) != 0 and len(order_depth.buy_orders) != 0:
+                        if best_ask - 1 > best_bid + 1:
+                            # Calculate remaining capacity
+                            left_to_buy = buy_limit - bought_amount
+                            left_to_sell = sold_amount - sell_limit
+                            
+                            # Make market on both sides
+                            if left_to_buy > 0:
+                                orders.append(Order(product, best_bid + 1, left_to_buy))
+                                logger.print("MAKING INK BUY", str(left_to_buy) + "x", best_bid+1)
+                            if left_to_sell > 0:
+                                orders.append(Order(product, best_ask - 1, -left_to_sell))
+                                logger.print("MAKING INK SELL", str(left_to_sell) + "x", best_ask-1)
+                    # Add orders to result
+                    result[product] = orders
+                
                             
             
                     
