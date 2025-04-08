@@ -38,3 +38,5 @@ class Trader:
 				# Sample conversion request. Check more details below. 
         conversions = 1
         return result, conversions, traderData
+    
+print("Hello")
