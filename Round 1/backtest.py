@@ -9,18 +9,19 @@ import random
 from functools import partial
 
 # Define parameter ranges - consider reducing the grid size for initial testing
-PERIOD = np.arange(10, 55, 5)
-OVERSOLD = np.arange(20, 40, 2)
-OVERBOUGHT = np.arange(60, 80, 2)
-AGGRESSION_FACTOR = np.arange(0.2, 0.8, 0.1)
-LOW_BUY = np.arange(5, 25, 5)
+PERIOD = np.arange(30, 75, 5)
+OVERSOLD = np.arange(25, 41, 1)
+OVERBOUGHT = np.arange(60, 76, 1)
+AGGRESSION_FACTOR = np.arange(0.1, 0.7, 0.1)
+LOW_BUY = np.arange(10, 25, 5)
 HIGH_SELL = np.arange(75, 95, 5)
-BUY_AMOUNT = np.arange(5, 16, 5)
+BUY_AMOUNT = np.arange(2, 20, 1)
 
 # Set this to True to use sampling instead of full grid search
 USE_SAMPLING = True
 # Number of parameter combinations to sample if USE_SAMPLING is True
-SAMPLE_SIZE = 1000
+# At 100 backtests per minute, we can run approximately 36,000 tests in 6 hours
+SAMPLE_SIZE = 36000
 # Set early stopping threshold - if profit is below this, stop the process early
 EARLY_STOP_THRESHOLD = -10000
 
@@ -139,7 +140,7 @@ def write_results_to_csv(results, csv_filename):
 
 if __name__ == "__main__":
     # Define CSV filename for results
-    csv_filename = 'backtest_results_weighted.csv'
+    csv_filename = 'backtest_results.csv'
     
     # Create the CSV file with headers (always create a new file)
     with open(csv_filename, 'w', newline='') as csvfile:

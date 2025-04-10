@@ -239,6 +239,8 @@ class Trader:
         position_limit = self.position_limits["SQUID_INK"]
         available_to_buy = position_limit - position
         available_to_sell = position_limit + position
+
+        print(f"RSI: {rsi}, Position: {position}, Available to Buy: {available_to_buy}, Available to Sell: {available_to_sell}")
         
         # Generate trading signals
         if rsi < self.rsi_oversold:
@@ -268,6 +270,51 @@ class Trader:
                 return "SELL", amount_to_trade
                 
         return "HOLD", 0
+    
+    def bollinger_band(self, prices, order_depth: OrderDepth, window=50, num_std=2):
+        """Calculate Bollinger Bands and generate trading signals"""
+        # Check if we have enough data
+        if len(prices) < 1:
+            return "HOLD", 0
+        
+        # Get the most recent price (last element)
+        current_price = prices[-1]
+        
+        # If we don't have enough data for the window, use all available data
+        actual_window = min(window, len(prices))
+        if actual_window < 2:  # Need at least 2 points for a meaningful calculation
+            return "HOLD", 0
+        
+        # Calculate moving average and standard deviation
+        # Convert deque to list before slicing
+        prices_list = list(prices)
+        recent_prices = prices_list[-actual_window:]
+        ma = np.mean(recent_prices)
+        std = np.std(recent_prices)
+        
+        # Calculate upper and lower bands
+        upper_band = ma + (std * num_std)
+        lower_band = ma - (std * num_std)
+        
+        # Generate trading signals with safety checks on order_depth
+        if current_price < lower_band:
+            # Buy signal - price below lower band
+            if order_depth.sell_orders:  # Check that sell_orders exists and is not empty
+                best_ask_price = min(order_depth.sell_orders.keys())
+                best_ask_amount = abs(order_depth.sell_orders[best_ask_price])
+                return "BUY", best_ask_amount
+            else:
+                return "HOLD", 0
+        elif current_price > upper_band:
+            # Sell signal - price above upper band
+            if order_depth.buy_orders:  # Check that buy_orders exists and is not empty
+                best_bid_price = max(order_depth.buy_orders.keys())
+                best_bid_amount = order_depth.buy_orders[best_bid_price]
+                return "SELL", best_bid_amount
+            else:
+                return "HOLD", 0
+        else:
+            return "HOLD", 0
         
     def calculate_mid_price(self, order_depth: OrderDepth):
         """Calculate mid price based on order depth"""
@@ -362,20 +409,42 @@ class Trader:
                 
             elif product == "SQUID_INK":
                 price_data = self.historical_data.get(product, None)
+                # # Initialize tracking variables
+                # position = state.position.get(product,0)
+                # position_limit = self.position_limits[product]
+                # buy_limit = position_limit - position
+                # sell_limit = -position_limit - position  # negative limit
+                # bought_amount, sold_amount = 0, 0
+                # left_to_buy = buy_limit - bought_amount
+                # left_to_sell = sold_amount - sell_limit
+
+                # indicator, amount_to_trade = self.bollinger_band(price_data['mid_price'], order_depth,
+                #                                                      window=int(os.environ.get('WINDOW')),
+                #                                                      num_std=float(os.environ.get('NUM_STD')))
+                # if indicator == "BUY":
+                #     if position < self.position_limits[product]:
+                #         best_ask_price, best_ask_amount = list(order_depth.sell_orders.items())[0] 
+                #         orders.append(Order(product, best_ask_price, best_ask_amount))
+                #         position += amount_to_trade
+                #         bought_amount += amount_to_trade
+                # elif indicator == "SELL":
+                #     if position > -self.position_limits[product]:
+                #         best_bid_price, best_bid_amount = list(order_depth.buy_orders.items())[0]
+                #         orders.append(Order(product, best_bid_price, -best_bid_amount))
+                #         position -= amount_to_trade
+                #         sold_amount -= amount_to_trade
                 
-                # Debug to check what data we have
-                logger.print(f"SQUID_INK price_data: {bool(price_data)}")
-                if price_data:
-                    logger.print(f"VWAP available: {bool('vwap' in price_data)}")
-                    logger.print(f"VWAP length: {len(price_data['vwap']) if 'vwap' in price_data else 0}")
+                # # Debug to check what data we have
+                # logger.print(f"SQUID_INK price_data: {bool(price_data)}")
+                # if price_data:
+                #     logger.print(f"VWAP available: {bool('vwap' in price_data)}")
+                #     logger.print(f"VWAP length: {len(price_data['vwap']) if 'vwap' in price_data else 0}")
                 
                 # Changed this condition to check if 'vwap' exists and has data
-                if price_data and 'vwap' in price_data and len(price_data['vwap']) > 0:
+                if price_data and 'mid_price' in price_data and len(price_data['mid_price']) > 0:
                     # Get RSI trading signal
                     indicator, amount_to_trade = self.rsi_strategy(
-                        price_data['vwap'], order_depth)
-                    
-                    logger.print(f"RSI signal: {indicator}, amount: {amount_to_trade}")
+                        price_data['mid_price'], order_depth)
                     
                     if indicator == "BUY" and amount_to_trade > 0:
                         if order_depth.sell_orders:
