@@ -171,7 +171,7 @@ class Trader:
             return mmmid_price
         return None
     
-    def bollinger_band(self, prices: pd.Series, order_depth: OrderDepth, window=20, num_std=1):
+    def bollinger_band(self, prices: pd.Series, order_depth: OrderDepth, window=25, num_std=0.03):
         """Calculate Bollinger Bands and generate trading signals"""
         # Check if we have enough data
         if len(prices) < 1:
@@ -200,7 +200,7 @@ class Trader:
             if len(order_depth.buy_orders) > 0:
                 best_bid_price = max(order_depth.buy_orders.keys())
                 best_bid_amount = order_depth.buy_orders[best_bid_price]
-                return "BUY", min(10, best_bid_amount)
+                return "BUY", best_bid_amount
             else:
                 return "HOLD", 0
         elif current_price > upper_band:
@@ -208,7 +208,7 @@ class Trader:
             if len(order_depth.sell_orders) > 0:
                 best_ask_price = min(order_depth.sell_orders.keys())
                 best_ask_amount = abs(order_depth.sell_orders[best_ask_price])
-                return "SELL", min(10, best_ask_amount)
+                return "SELL", best_ask_amount
             else:
                 return "HOLD", 0
         else:
