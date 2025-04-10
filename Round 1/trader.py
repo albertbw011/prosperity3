@@ -2,11 +2,9 @@ import json
 from typing import Any, List
 import numpy as np
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
-import math
 import _pickle as cPickle
 import io
 import base64
-import os
 
 class Logger:
     def __init__(self) -> None:
@@ -272,7 +270,7 @@ class Trader:
         if rsi < oversold:
             # Buy signal - RSI below oversold threshold
             # More aggressive scale factor calculation (starts higher, scales faster)
-            rsi_scale_factor = max(float(os.environ.get('AGGRESSION_FACTOR')), min(1.0, (oversold - rsi) / (oversold - int(os.environ.get('LOW_BUY')))))
+            rsi_scale_factor = max(0.2, min(1.0, (oversold - rsi) / (oversold - 15)))
             
             if len(order_depth.sell_orders) > 0 and available_to_buy > 0:
                 # Buy using the SELL side of the order book (best ask price)
@@ -280,7 +278,7 @@ class Trader:
                 best_ask_amount = -order_depth.sell_orders[best_ask_price]  # Convert negative to positive
                 
                 # Scale the amount based on RSI extremeness and available position - more aggressive
-                amount_to_trade = min(int(available_to_buy * rsi_scale_factor) + int(os.environ.get('BUY_AMOUNT')), best_ask_amount)
+                amount_to_trade = min(int(available_to_buy * rsi_scale_factor) + 5, best_ask_amount)
                 
                 logger.print(f"RSI oversold: {rsi:.2f} (scale: {rsi_scale_factor:.2f}), buying {amount_to_trade} at {best_ask_price}")
                 return "BUY", amount_to_trade
@@ -290,7 +288,7 @@ class Trader:
         elif rsi > overbought:
             # Sell signal - RSI above overbought threshold
             # More aggressive scale factor calculation (starts higher, scales faster) 
-            rsi_scale_factor = max(float(os.environ.get('AGGRESSION_FACTOR')), min(1.0, (rsi - overbought) / (int(os.environ.get('HIGH_SELL')) - overbought)))
+            rsi_scale_factor = max(0.2, min(1.0, (rsi - overbought) / (75 - overbought)))
             
             if len(order_depth.buy_orders) > 0 and available_to_sell > 0:
                 # Sell using the BUY side of the order book (best bid price)
@@ -298,7 +296,7 @@ class Trader:
                 best_bid_amount = order_depth.buy_orders[best_bid_price]
                 
                 # Scale the amount based on RSI extremeness and available position - more aggressive
-                amount_to_trade = min(int(available_to_sell * rsi_scale_factor) + int(os.environ.get('BUY_AMOUNT')), best_bid_amount)
+                amount_to_trade = min(int(available_to_sell * rsi_scale_factor) + 5, best_bid_amount)
 
                 logger.print(f"RSI overbought: {rsi:.2f} (scale: {rsi_scale_factor:.2f}), selling {amount_to_trade} at {best_bid_price}")
                 return "SELL", amount_to_trade
@@ -669,19 +667,11 @@ class Trader:
                     position = self.positions[product]
                     position_limit = self.position_limits[product]
                     
-                    # Parse period from environment variable if available
-                    period = 25
-                    if os.environ.get('PERIOD') is not None:
-                        try:
-                            period = int(os.environ.get('PERIOD'))
-                        except (ValueError, TypeError):
-                            pass
-                    
                     # Get RSI trading signal
                     indicator, amount_to_trade = self.rsi_strategy(price_data['mid_price'], order_depth, 
-                                                                   period=int(os.environ.get('PERIOD')),
-                                                                    oversold=int(os.environ.get('OVERSOLD')),
-                                                                    overbought=int(os.environ.get('OVERBOUGHT')))
+                                                                   period=50,
+                                                                    oversold=30,
+                                                                    overbought=60)
                     
                     if indicator == "BUY" and amount_to_trade > 0:
                         if position < self.position_limits[product] and len(order_depth.sell_orders) > 0:
