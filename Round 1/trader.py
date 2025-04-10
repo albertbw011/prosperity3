@@ -2,6 +2,7 @@ import json
 from typing import Any, List
 
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
+import math
 
 
 class Logger:
@@ -129,7 +130,6 @@ class Trader:
         self.position_limits = {"RAINFOREST_RESIN": 50, "KELP": 50, "SQUID_INK": 50}
         self.positions = {"RAINFOREST_RESIN": 0, "KELP": 0, "SQUID_INK": 0}
         
-        # Strategy parameters
         self.params = {
             "KELP": {
                 "take_width": 1,         # Threshold for taking market orders
@@ -138,9 +138,21 @@ class Trader:
                 "adverse_volume": 15,     # Volume threshold for large orders
                 "disregard_edge": 1,      # Ignore orders near fair value
                 "join_edge": 0,           # Join existing orders within this range
-                "default_edge": 1         # Default spread from fair value
+                "default_edge": 1,        # Default spread from fair value
+                # GLFT parameters
+                "gamma": 0.2,             # Risk aversion parameter
+                "sigma": 0.75,            # Volatility estimate from historical data
+                "order_amount": 50,       # Optimal order size from backtesting
+                "mu": 0                   # Assume no drift
+            },
+            "SQUID_INK": {
+                "ma_window": 10,       # Moving average window
+                "threshold_factor": 2, # Multiply std dev to determine entry threshold
             }
         }
+        # Price history for volatility calculation
+        self.price_history = {"KELP": []}
+        self.mid_prices = {"KELP": None}
         
     
     def calculate_kelp_price(self, order_depth: OrderDepth):
@@ -148,170 +160,293 @@ class Trader:
         if len(order_depth.sell_orders) != 0 and len(order_depth.buy_orders) != 0:
             best_ask = min(order_depth.sell_orders.keys())
             best_bid = max(order_depth.buy_orders.keys())
+            
+            # Store mid price for reference
+            self.mid_prices["KELP"] = (best_ask + best_bid) / 2
+            
+            # Find large volume orders
             filtered_ask = [ #adverse volume
                 price
                 for price in order_depth.sell_orders.keys()
                 if abs(order_depth.sell_orders[price])
-                >= 15
+                >= self.params["KELP"]["adverse_volume"]
             ]
             filtered_bid = [ #adverse volume
                 price
                 for price in order_depth.buy_orders.keys()
                 if abs(order_depth.buy_orders[price])
-                >= 15
+                >= self.params["KELP"]["adverse_volume"]
             ]
             mm_ask = min(filtered_ask) if len(filtered_ask) > 0 else None
             mm_bid = max(filtered_bid) if len(filtered_bid) > 0 else None
+            
+            # Calculate fair price
             if mm_ask == None or mm_bid == None:
                 mmmid_price = (best_ask + best_bid) / 2
             else:
                 mmmid_price = (mm_ask + mm_bid) / 2
-
+            
+            # Update price history for volatility calculation
+            self.price_history["KELP"].append(mmmid_price)
+            if len(self.price_history["KELP"]) > 50:  # Keep a rolling window
+                self.price_history["KELP"].pop(0)
+                
             return mmmid_price
         return None
     
-    #def take_best_orders(self, product: str, fair_value: float, order_depth: OrderDepth, orders: List[Order]):
-        """Take immediately profitable orders based on fair value"""
-        position = self.positions[product]
-        position_limit = self.position_limits[product]
-        take_width = self.params[product]["take_width"]
-        prevent_adverse = self.params[product]["prevent_adverse"]
-        adverse_volume = self.params[product]["adverse_volume"]
-        
-        buy_order_volume = 0
-        sell_order_volume = 0
-        
-        # Check sell orders for buying opportunities
-        if len(order_depth.sell_orders) > 0:
-            best_ask = min(order_depth.sell_orders.keys())
-            best_ask_amount = -1 * order_depth.sell_orders[best_ask]
+    def get_max_volume_prices(self, order_depth: OrderDepth):
+        """Find prices with maximum volume on bid and ask sides"""
+        max_bid_vol = 0
+        max_bid_price = None
+        for price, volume in order_depth.buy_orders.items():
+            if volume > max_bid_vol:
+                max_bid_vol = volume
+                max_bid_price = price
+                
+        max_ask_vol = 0
+        max_ask_price = None
+        for price, volume in order_depth.sell_orders.items():
+            if abs(volume) > max_ask_vol:
+                max_ask_vol = abs(volume)
+                max_ask_price = price
+                
+        if max_bid_price is None and len(order_depth.buy_orders) > 0:
+            max_bid_price = max(order_depth.buy_orders.keys())
             
-            # Only trade if not preventing adverse selection or volume is small enough
-            if not prevent_adverse or abs(best_ask_amount) <= adverse_volume:
-                # Take if price is favorable compared to fair value
-                if best_ask <= fair_value - take_width:
-                    quantity = min(best_ask_amount, position_limit - position)
-                    if quantity > 0:
-                        orders.append(Order(product, best_ask, quantity))
-                        buy_order_volume += quantity
-        
-        # Check buy orders for selling opportunities
-        if len(order_depth.buy_orders) > 0:
-            best_bid = max(order_depth.buy_orders.keys())
-            best_bid_amount = order_depth.buy_orders[best_bid]
+        if max_ask_price is None and len(order_depth.sell_orders) > 0:
+            max_ask_price = min(order_depth.sell_orders.keys())
             
-            # Only trade if not preventing adverse selection or volume is small enough
-            if not prevent_adverse or abs(best_bid_amount) <= adverse_volume:
-                # Take if price is favorable compared to fair value
-                if best_bid >= fair_value + take_width:
-                    quantity = min(best_bid_amount, position_limit + position)
-                    if quantity > 0:
-                        orders.append(Order(product, best_bid, -1 * quantity))
-                        sell_order_volume += quantity
-        
-        return buy_order_volume, sell_order_volume
-
-    #def clear_position(self, product: str, fair_value: float, order_depth: OrderDepth, orders: List[Order], buy_volume: int, sell_volume: int):
-        """Clear existing position if possible at favorable prices"""
-        position = self.positions[product]
-        position_after_take = position + buy_volume - sell_volume
-        clear_width = self.params[product]["clear_width"]
-        position_limit = self.position_limits[product]
-        
-        # Calculate prices for clearing
-        fair_for_bid = round(fair_value - clear_width)
-        fair_for_ask = round(fair_value + clear_width)
-        
-        # Calculate remaining capacity
-        buy_capacity = position_limit - (position + buy_volume)
-        sell_capacity = position_limit + (position - sell_volume)
-        
-        # Try to clear positive position by selling
-        if position_after_take > 0:
-            # Find buy orders at or above our ask price
-            clear_quantity = sum(
-                volume
-                for price, volume in order_depth.buy_orders.items()
-                if price >= fair_for_ask
-            )
-            clear_quantity = min(clear_quantity, position_after_take)
-            sent_quantity = min(sell_capacity, clear_quantity)
-            
-            if sent_quantity > 0:
-                orders.append(Order(product, fair_for_ask, -abs(sent_quantity)))
-                sell_volume += abs(sent_quantity)
-        
-        # Try to clear negative position by buying
-        if position_after_take < 0:
-            # Find sell orders at or below our bid price
-            clear_quantity = sum(
-                abs(volume)
-                for price, volume in order_depth.sell_orders.items()
-                if price <= fair_for_bid
-            )
-            clear_quantity = min(clear_quantity, abs(position_after_take))
-            sent_quantity = min(buy_capacity, clear_quantity)
-            
-            if sent_quantity > 0:
-                orders.append(Order(product, fair_for_bid, abs(sent_quantity)))
-                buy_volume += abs(sent_quantity)
-        
-        return buy_volume, sell_volume
+        return max_bid_price, max_ask_price
     
-    #def make_market(self, product: str, fair_value: float, order_depth: OrderDepth, orders: List[Order], buy_volume: int, sell_volume: int):
-        """Place market making orders on both sides of the book"""
-        position = self.positions[product]
+    def calculate_order_book_imbalance(self, order_depth: OrderDepth):
+        """Calculate the order book imbalance"""
+        total_bid_vol = sum(vol for vol in order_depth.buy_orders.values())
+        total_ask_vol = sum(abs(vol) for vol in order_depth.sell_orders.values())
+        total_vol = total_bid_vol + total_ask_vol
+        
+        if total_vol > 0:
+            return (total_bid_vol - total_ask_vol) / total_vol
+        return 0
+
+    def trade_squid_ink(self, state, orders: List['Order']):
+        """
+        Trade SQUID_INK using a simplified mean reversion strategy.
+        """
+        product = "SQUID_INK"
+        
+        # Make sure we have market data
+        if product not in state.order_depths:
+            return orders
+        
+        order_depth = state.order_depths[product]
+        position = state.position.get(product, 0)
+        self.positions[product] = position
+        
+        # Check if we have bids and asks to form a mid-price
+        if not order_depth.sell_orders or not order_depth.buy_orders:
+            return orders
+        
+        best_ask = min(order_depth.sell_orders.keys())
+        best_bid = max(order_depth.buy_orders.keys())
+        mid_price = (best_ask + best_bid) / 2
+        
+        # Initialize price history if needed
+        if product not in self.price_history:
+            self.price_history[product] = []
+        
+        # Update rolling price history
+        self.price_history[product].append(mid_price)
+        
+        # Extract parameters
+        ma_window = self.params[product]["ma_window"]
+        threshold_factor = self.params[product]["threshold_factor"]
         position_limit = self.position_limits[product]
-        disregard_edge = self.params[product]["disregard_edge"]
-        join_edge = self.params[product]["join_edge"]
-        default_edge = self.params[product]["default_edge"]
         
-        # Find orders outside the disregard zone
-        asks_above_fair = [
-            price
-            for price in order_depth.sell_orders.keys()
-            if price > fair_value + disregard_edge
-        ]
-        bids_below_fair = [
-            price
-            for price in order_depth.buy_orders.keys()
-            if price < fair_value - disregard_edge
-        ]
+        # Ensure enough data points to compute a moving average
+        if len(self.price_history[product]) < ma_window:
+            return orders
         
-        # Find best prices to reference
-        best_ask_above_fair = min(asks_above_fair) if asks_above_fair else None
-        best_bid_below_fair = max(bids_below_fair) if bids_below_fair else None
+        # Keep price history from growing infinitely
+        # (Keep about 2 x ma_window for safety)
+        max_history = ma_window * 2
+        if len(self.price_history[product]) > max_history:
+            self.price_history[product] = self.price_history[product][-max_history:]
         
-        # Calculate ask price - either join, penny, or use default
-        ask = round(fair_value + default_edge)
-        if best_ask_above_fair is not None:
-            if abs(best_ask_above_fair - fair_value) <= join_edge:
-                ask = best_ask_above_fair  # join existing order
-            else:
-                ask = best_ask_above_fair - 1  # penny existing order
+        # Compute the simple moving average (SMA) and volatility (std dev)
+        recent_prices = self.price_history[product][-ma_window:]
+        sma = sum(recent_prices) / len(recent_prices)
         
-        # Calculate bid price - either join, penny, or use default
-        bid = round(fair_value - default_edge)
-        if best_bid_below_fair is not None:
-            if abs(fair_value - best_bid_below_fair) <= join_edge:
-                bid = best_bid_below_fair  # join existing order
-            else:
-                bid = best_bid_below_fair + 1  # penny existing order
+        # Calculate standard deviation for the same window
+        mean = sma
+        variance = sum((p - mean)**2 for p in recent_prices) / len(recent_prices)
+        stdev = math.sqrt(variance)
         
-        # Calculate order quantities
-        buy_quantity = position_limit - (position + buy_volume)
-        sell_quantity = position_limit + (position - sell_volume)
+        # Define an adaptive threshold = threshold_factor * stdev
+        threshold_up = sma + threshold_factor * stdev
+        threshold_down = sma - threshold_factor * stdev
         
-        # Place orders if quantities are positive
-        if buy_quantity > 0:
-            orders.append(Order(product, round(bid), buy_quantity))
-            buy_volume += buy_quantity
+        # Trading signal logic:
+        # - If mid_price is above threshold_up -> short
+        # - If mid_price is below threshold_down -> long
+        # - Exit when mid_price crosses back near SMA
+        signal = "none"
+        
+        if mid_price > threshold_up:
+            signal = "short"
+        elif mid_price < threshold_down:
+            signal = "long"
+        
+        # Decide how to update positions
+        if signal == "long":
+            # Target a full long position
+            target_position = position_limit
+            if position < target_position:
+                buy_size = target_position - position
+                # Execute buy near the ask
+                orders.append(Order(product, best_ask, buy_size))
+        
+        elif signal == "short":
+            # Target a full short position
+            target_position = -position_limit
+            if position > target_position:
+                sell_size = target_position - position  # This will be negative
+                # Execute sell near the bid
+                orders.append(Order(product, best_bid, sell_size))
+        
+        else:
+            # Check if we have an existing position that we want to unwind
+            # (exit positions when price goes back near the SMA)
+            if position != 0:
+                # If we're long and the price has dropped below SMA, or
+                # we’re short and price is above SMA, we can exit.
+                # For simplicity, exit any time mid_price crosses the SMA.
+                # You could also add a small "band" around SMA.
+                
+                # If currently long but mid_price < sma => exit
+                # If currently short but mid_price > sma => exit
+                should_exit = False
+                if position > 0 and mid_price < sma + threshold_factor * stdev:
+                    should_exit = True
+                elif position < 0 and mid_price > sma - threshold_factor * stdev:
+                    should_exit = True
+                
+                if should_exit:
+                    # Sell if position > 0, buy if position < 0
+                    if position > 0:
+                        # Sell the entire long position at the bid
+                        orders.append(Order(product, best_bid, -position))
+                    else:
+                        # Buy back the entire short position at the ask
+                        orders.append(Order(product, best_ask, -position))
+        
+        return orders
+    
+    #def trade_kelp_glft(self, state: TradingState, left_to_buy, left_to_sell, orders):
+        """
+        Implement GLFT market making strategy for KELP with adverse selection protection
+        """
+        product = "KELP"
+        order_depth = state.order_depths[product]
+        position = state.position.get(product, 0)
+        
+        # Update position tracking
+        self.positions[product] = position
+        
+        # Strategy parameters from config
+        params = self.params[product]
+        gamma = params["gamma"]
+        sigma = params["sigma"]
+        order_amount = params["order_amount"]
+        mu = params["mu"]
+        
+        # Calculate fair price
+        fair_price = self.calculate_kelp_price(order_depth)
+        if fair_price is None:
+            return []  # No fair price available
             
-        if sell_quantity > 0:
-            orders.append(Order(product, round(ask), -sell_quantity))
-            sell_volume += sell_quantity
+        # Get market variables
+        best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else fair_price - 5
+        best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else fair_price + 5
+        max_bid_price, max_ask_price = self.get_max_volume_prices(order_depth)
+        
+        # Detect adverse selection risk
+        #adverse_risk = self.detect_adverse_selection(order_depth)
+        
+        # Calculate order book imbalance
+        imbalance = self.calculate_order_book_imbalance(order_depth)
+        
+        # Apply GLFT model
+        q = position / order_amount  # Normalized position
+        
+        # Calculate arrival rates
+        kappa_b = 1 / max((fair_price - best_bid) - 1, 1)
+        kappa_a = 1 / max((best_ask - fair_price) - 1, 1)
+        
+        # Constants for optimal spread calculation
+        A_b = 0.25
+        A_a = 0.25
+        
+        # Calculate optimal distances from fair price
+        delta_b = 1 / gamma * math.log(1 + gamma / kappa_b) + \
+                 (-mu / (gamma * sigma**2) + (2 * q + 1) / 2) * \
+                 math.sqrt((sigma**2 * gamma) / (2 * kappa_b * A_b) * \
+                         (1 + gamma / kappa_b)**(1 + kappa_b / gamma))
+        
+        delta_a = 1 / gamma * math.log(1 + gamma / kappa_a) + \
+                 (mu / (gamma * sigma**2) - (2 * q - 1) / 2) * \
+                 math.sqrt((sigma**2 * gamma) / (2 * kappa_a * A_a) * \
+                         (1 + gamma / kappa_a)**(1 + kappa_a / gamma))
+        
+        # Adjust for adverse selection risk
+        """if adverse_risk:
+            if imbalance > 0.2:  # More buying pressure
+                delta_a *= 1.5   # Widen ask spread
+            elif imbalance < -0.2:  # More selling pressure
+                delta_b *= 1.5   # Widen bid spread"""
+        
+        # Calculate optimal prices
+        """p_b = round(fair_price - delta_b)
+        p_a = round(fair_price + delta_a)
+        
+        # Apply constraints
+        p_b = min(p_b, fair_price - 1)  # Never buy above fair price
+        p_b = min(p_b, best_bid + 1)  # Stay competitive
+        if max_bid_price is not None:
+            p_b = max(p_b, max_bid_price + 1)  # Don't place too far from max volume
+        
+        p_a = max(p_a, fair_price)  # Never sell below fair price
+        p_a = max(p_a, best_ask - 1)  # Stay competitive
+        if max_ask_price is not None:
+            p_a = min(p_a, max_ask_price - 1)  # Don't place too far from max volume"""
             
-        return buy_volume, sell_volume
+        
+        p_a = best_ask - 1
+        p_b = best_bid + 1
+        
+        # Calculate order sizes with position limits
+        position_limit = self.position_limits[product]
+        buy_limit = left_to_buy
+        sell_limit = left_to_sell
+        
+        buy_amount = buy_limit
+        logger.print(buy_amount)
+        sell_amount = sell_limit
+        
+        
+        # Skip placing orders in high adverse selection scenarios
+        #skip_buy = adverse_risk and imbalance < -0.3
+        #skip_sell = adverse_risk and imbalance > 0.3
+        if p_a > p_b:
+            if buy_amount > 0: #and not skip_buy:
+                orders.append(Order(product, int(p_b), int(buy_amount)))
+                logger.print(f"GLFT BUY {product}: {buy_amount}x @ {p_b}")
+            
+            if sell_amount > 0: #and not skip_sell:
+                orders.append(Order(product, int(p_a), -int(sell_amount)))
+                logger.print(f"GLFT SELL {product}: {sell_amount}x @ {p_a}")
+        
+        return orders
+    
     
     def run(self, state: TradingState):
 
@@ -369,51 +504,6 @@ class Trader:
                 left_to_sell = sold_amount - sell_limit #positive number
                 left_to_buy = buy_limit - bought_amount 
                 
-                
-                # Calculate current spread
-                """current_spread = best_ask - best_bid
-
-                # Set minimum spread to maintain
-                min_spread = 2  # Based on observed minimum spread in the market
-
-                # Determine how much to improve prices based on current spread
-                if current_spread <= min_spread + 2:  # If spread is tight (≤4)
-                    bid_improvement = 0  # Don't improve the bid
-                    ask_improvement = 0  # Don't improve the ask
-                else:  
-                    bid_improvement = 1  # Standard improvement
-                    ask_improvement = 1  # Standard improvement
-
-                # Calculate base prices with dynamic improvements
-                base_buy_price = best_bid + bid_improvement
-                base_sell_price = best_ask - ask_improvement
-
-                # Calculate position ratio (between -1 and 1)
-                inventory_ratio = self.positions[product] / self.position_limits[product]
-
-                # Mild position-based adjustments due to strong mean reversion
-                # Only adjust by at most 1 additional tick when approaching limits
-                adjustment_factor = 0.2  # Very mild adjustments due to strong mean reversion
-
-                if inventory_ratio > 0:
-                    # When long, be slightly more aggressive selling
-                    sell_adjustment = round(inventory_ratio * adjustment_factor * current_spread)
-                    # Ensure we maintain minimum spread and don't cross market
-                    sell_price = max(base_buy_price + min_spread, base_sell_price - sell_adjustment)
-                else:
-                    sell_price = base_sell_price
-
-                if inventory_ratio < 0:
-                    # When short, be slightly more aggressive buying
-                    buy_adjustment = round(abs(inventory_ratio) * adjustment_factor * current_spread)
-                    # Ensure we maintain minimum spread and don't cross market
-                    buy_price = min(base_sell_price - min_spread, base_buy_price + buy_adjustment)
-                else:
-                    buy_price = base_buy_price
-                    
-                orders.append(Order(product, buy_price, left_to_buy))
-                orders.append(Order(product, sell_price, -left_to_sell))"""
-                
                 logger.print("MAKING RAINFOREST_RESIN BUY", str(left_to_buy) + "x", best_bid+1)
                 orders.append(Order(product,best_bid+1,left_to_buy))
                 logger.print("MAKING RAINFOREST_RESIN SELL", str(left_to_sell) + "x", best_ask-1)
@@ -422,9 +512,12 @@ class Trader:
                             
                 result[product] = orders
             
+            
+                
             elif product == "KELP":
                 fair_value = self.calculate_kelp_price(order_depth)
-                logger.print("Fair value: " + str(fair_value))
+                #fair_value = (min(order_depth.sell_orders.keys()) + max(order_depth.buy_orders.keys())) / 2
+                logger.print("Fair value kelp: " + str(fair_value))
                 if fair_value is not None:
                     # Initialize tracking variables
                     position = state.position.get(product,0)
@@ -433,132 +526,123 @@ class Trader:
                     sell_limit = -position_limit - position  # negative limit
                     bought_amount, sold_amount = 0, 0
                     
+                    
+                    
+                                
+                    
                     # Market taking - sell side (buying)
                     if len(order_depth.sell_orders) != 0:
                         best_ask, best_ask_amount = list(order_depth.sell_orders.items())[0]
                         
                         # Check if we can buy at favorable price
-                        if position < self.position_limits[product] and best_ask < fair_value:
+                        i = 0
+                        while position < self.position_limits[product] and best_ask < fair_value:
                             buy_amount = min(position_limit - position, -best_ask_amount)
                             orders.append(Order(product, best_ask, buy_amount))
                             logger.print("BUY KELP", str(buy_amount) + "x", best_ask)
                             position += buy_amount
                             bought_amount += buy_amount
-                            if buy_amount == -best_ask_amount and len(order_depth.sell_orders) > 1:
-                                best_ask, best_ask_amount = list(order_depth.sell_orders.items())[1]    
+                            if buy_amount == -best_ask_amount and len(order_depth.sell_orders) > i + 1:
+                                best_ask, best_ask_amount = list(order_depth.sell_orders.items())[i+1]
+                            else:
+                                break
+                        
+                        #position reduction to reduce risk
+                        if int(best_ask) == fair_value and self.positions[product] < 0:
+                            buy_amount = min(-self.positions[product],-best_ask_amount)
+                            logger.print("BUY KELP", str(buy_amount) + "x", best_ask)
+                            orders.append(Order(product,best_ask,buy_amount))
+                            self.positions[product] += buy_amount
+                            bought_amount += buy_amount
+            
                     
                     # Market taking - buy side (selling)
                     if len(order_depth.buy_orders) != 0:
                         best_bid, best_bid_amount = list(order_depth.buy_orders.items())[0]
                         
                         # Check if we can sell at favorable price
-                        if position > -self.position_limits[product] and best_bid > fair_value:
+                        i = 0
+                        while position > -self.position_limits[product] and best_bid > fair_value:
                             sell_amount = min(position + position_limit, best_bid_amount)
                             logger.print("SELL KELP", str(sell_amount) + "x", best_bid)
                             orders.append(Order(product, best_bid, -sell_amount))
                             position -= sell_amount
                             sold_amount -= sell_amount
-                            if sell_amount == best_bid_amount and len(order_depth.buy_orders) > 1:
-                                best_bid, best_bid_amount = list(order_depth.buy_orders.items())[1]
-                    
-                    # Market making
-                    if len(order_depth.sell_orders) != 0 and len(order_depth.buy_orders) != 0:
-                        if best_ask - 1 > best_bid + 1:
-                            # Calculate remaining capacity
-                            left_to_buy = buy_limit - bought_amount
-                            left_to_sell = sold_amount - sell_limit
+                            if sell_amount == best_bid_amount and len(order_depth.buy_orders) > i + 1:
+                                best_bid, best_bid_amount = list(order_depth.buy_orders.items())[i+1]
+                                i += 1
+                            else:
+                                break
                             
-                            # Make market on both sides
-                            if left_to_buy > 0:
-                                orders.append(Order(product, best_bid + 1, left_to_buy))
-                                logger.print("MAKING KELP BUY", str(left_to_buy) + "x", best_bid+1)
-                            if left_to_sell > 0:
-                                orders.append(Order(product, best_ask - 1, -left_to_sell))
-                                logger.print("MAKING KELP SELL", str(left_to_sell) + "x", best_ask-1)
-                    # Add orders to result
-                    result[product] = orders
-            elif product == "SQUID_INK":
-                fair_value = self.calculate_kelp_price(order_depth)
-                if fair_value is not None:
-                    # Initialize tracking variables
-                    position = state.position.get(product,0)
-                    position_limit = self.position_limits[product]
-                    buy_limit = position_limit - position
-                    sell_limit = -position_limit - position  # negative limit
-                    bought_amount, sold_amount = 0, 0
-                    
-                    # Market taking - sell side (buying)
-                    if len(order_depth.sell_orders) != 0:
-                        best_ask, best_ask_amount = list(order_depth.sell_orders.items())[0]
-                        
-                        # Check if we can buy at favorable price
-                        if position < self.position_limits[product] and best_ask < fair_value:
-                            buy_amount = min(position_limit - position, -best_ask_amount)
-                            orders.append(Order(product, best_ask, buy_amount))
-                            logger.print("BUY INK", str(buy_amount) + "x", best_ask)
-                            position += buy_amount
-                            bought_amount += buy_amount
-                            if buy_amount == -best_ask_amount and len(order_depth.sell_orders) > 1:
-                                best_ask, best_ask_amount = list(order_depth.sell_orders.items())[1]    
-                    
-                    # Market taking - buy side (selling)
-                    if len(order_depth.buy_orders) != 0:
-                        best_bid, best_bid_amount = list(order_depth.buy_orders.items())[0]
-                        
-                        # Check if we can sell at favorable price
-                        if position > -self.position_limits[product] and best_bid > fair_value:
-                            sell_amount = min(position + position_limit, best_bid_amount)
-                            logger.print("SELL INK", str(sell_amount) + "x", best_bid)
-                            orders.append(Order(product, best_bid, -sell_amount))
-                            position -= sell_amount
+                        #position reduction to reduce risk
+                        if int(best_bid) == fair_value and self.positions[product] > 0:
+                            sell_amount = min(self.positions[product],best_bid_amount)
+                            logger.print("SELL KELP", str(sell_amount) + "x", best_bid)
+                            orders.append(Order(product,best_bid,-sell_amount))
+                            self.positions[product] -= sell_amount
                             sold_amount -= sell_amount
-                            if sell_amount == best_bid_amount and len(order_depth.buy_orders) > 1:
-                                best_bid, best_bid_amount = list(order_depth.buy_orders.items())[1]
                     
                     # Market making
+                    best_ask, best_ask_amount = list(order_depth.sell_orders.items())[0]
+                    best_bid, best_bid_amount = list(order_depth.buy_orders.items())[0]
+                    bb, ba = self.get_max_volume_prices(order_depth)
+                    
+                    min_edge = 1
+                    aaf = [
+                        price
+                        for price in order_depth.sell_orders.keys()
+                        if price >= round(fair_value + min_edge)
+                    ]
+                    bbf = [
+                        price
+                        for price in order_depth.buy_orders.keys()
+                        if price <= round(fair_value - min_edge)
+                    ]
+                    baaf = min(aaf) if len(aaf) > 0 else round(fair_value + min_edge)
+                    bbbf = max(bbf) if len(bbf) > 0 else round(fair_value - min_edge)
                     if len(order_depth.sell_orders) != 0 and len(order_depth.buy_orders) != 0:
                         if best_ask - 1 > best_bid + 1:
+                            left_to_buy = buy_limit - bought_amount
+                            left_to_sell = sold_amount - sell_limit
+                            
+                            # Make market on both sides
+                            if left_to_buy > 0:
+                                orders.append(Order(product, bb + 1, left_to_buy))
+                                logger.print("MAKING KELP BUY", str(left_to_buy) + "x", bb+1)
+                            if left_to_sell > 0:
+                                orders.append(Order(product, ba - 1, -left_to_sell))
+                                logger.print("MAKING KELP SELL", str(left_to_sell) + "x", ba-1)
+                        elif ba - 1 > bb+ 1:
                             # Calculate remaining capacity
                             left_to_buy = buy_limit - bought_amount
                             left_to_sell = sold_amount - sell_limit
                             
                             # Make market on both sides
                             if left_to_buy > 0:
-                                orders.append(Order(product, best_bid + 1, left_to_buy))
-                                logger.print("MAKING INK BUY", str(left_to_buy) + "x", best_bid+1)
+                                orders.append(Order(product, bb + 1, left_to_buy))
+                                logger.print("MAKING KELP BUY", str(left_to_buy) + "x", bb+1)
                             if left_to_sell > 0:
-                                orders.append(Order(product, best_ask - 1, -left_to_sell))
-                                logger.print("MAKING INK SELL", str(left_to_sell) + "x", best_ask-1)
+                                orders.append(Order(product, ba - 1, -left_to_sell))
+                                logger.print("MAKING KELP SELL", str(left_to_sell) + "x", ba-1)
+                            
                     # Add orders to result
                     result[product] = orders
-                
-                            
             
-                    
-            """acceptable_price = 10  # Participant should calculate this value
-            print("Acceptable price : " + str(acceptable_price))
-            print("Buy Order depth : " + str(len(order_depth.buy_orders)) + ", Sell order depth : " + str(len(order_depth.sell_orders)))
-    
-            if len(order_depth.sell_orders) != 0:
-                best_ask, best_ask_amount = list(order_depth.sell_orders.items())[0]
-                if int(best_ask) < acceptable_price:
-                    print("BUY", str(-best_ask_amount) + "x", best_ask)
-                    orders.append(Order(product, best_ask, -best_ask_amount))
-    
-            if len(order_depth.buy_orders) != 0:
-                best_bid, best_bid_amount = list(order_depth.buy_orders.items())[0]
-                if int(best_bid) > acceptable_price:
-                    print("SELL", str(best_bid_amount) + "x", best_bid)
-                    orders.append(Order(product, best_bid, -best_bid_amount))
-            
-            result[product] = orders"""
-    
-		    # String value holding Trader state data required. 
-				# It will be delivered as TradingState.traderData on next execution.
-        traderData = "SAMPLE" 
+            elif product == "SQUID_INK":
+                product_orders = []
+                product_orders = self.trade_squid_ink(state, product_orders)
+                result[product] = product_orders
+
+        # String value holding Trader state data required.
+        traderData = json.dumps({
+            "positions": self.positions,
+            "mid_prices": self.mid_prices
+        })
         
 				# Sample conversion request. Check more details below. 
         conversions = 1
         logger.flush(state, result, conversions, traderData)
+        logger.print(result)
         return result, conversions, traderData
+    
     
