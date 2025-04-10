@@ -171,7 +171,7 @@ class Trader:
             return mmmid_price
         return None
     
-    def bollinger_band(self, prices: pd.Series, order_depth: OrderDepth, window=25, num_std=0.03):
+    def bollinger_band(self, prices: pd.Series, order_depth: OrderDepth, window=50, num_std=2):
         """Calculate Bollinger Bands and generate trading signals"""
         # Check if we have enough data
         if len(prices) < 1:
@@ -212,6 +212,100 @@ class Trader:
             else:
                 return "HOLD", 0
         else:
+            return "HOLD", 0
+        
+    def calculate_rsi(self, prices: pd.Series, period=30):
+        """Calculate RSI with proper handling for edge cases"""
+        # Check if we have enough data
+        if len(prices) < period + 1:
+            logger.print(f"Not enough data for RSI calculation: {len(prices)} < {period + 1}")
+            return 50  # Return neutral RSI when insufficient data
+        
+        # Calculate price changes
+        deltas = np.diff(prices)
+        
+        # Create arrays for gains and losses
+        gains = np.where(deltas > 0, deltas, 0)
+        losses = np.where(deltas < 0, -deltas, 0)
+        
+        # Ensure we have valid data
+        if len(gains) == 0 or len(losses) == 0:
+            return 50  # Return neutral RSI value
+            
+        # Calculate average gains and losses - use the most recent period
+        avg_gain = np.mean(gains[-period:])
+        avg_loss = np.mean(losses[-period:])
+        
+        # Handle zero loss case to avoid division by zero
+        if avg_loss == 0:
+            return 100 if avg_gain > 0 else 50
+        
+        # Calculate RS and RSI
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        
+        return rsi
+    
+    def rsi_strategy(self, prices: pd.Series, order_depth: OrderDepth, period=25, oversold=32, overbought=68):
+        """RSI strategy optimized for small position limits - more aggressive settings"""
+        # Only calculate RSI if we have sufficient data
+        if len(prices) < period + 1:
+            logger.print(f"Not enough data for RSI strategy: {len(prices)} < {period + 1}")
+            return "HOLD", 0
+            
+        rsi = self.calculate_rsi(prices, period)
+        
+        # Handle invalid RSI values
+        if rsi is None or pd.isna(rsi):
+            logger.print("RSI calculation returned invalid value")
+            return "HOLD", 0
+        
+        logger.print(f"RSI: {rsi:.2f}")
+
+        # Get current position
+        position = self.positions.get("SQUID_INK", 0)
+        position_limit = self.position_limits["SQUID_INK"]
+        available_to_buy = position_limit - position
+        available_to_sell = position_limit + position
+        
+        # Generate trading signals with safety checks on order_depth
+        if rsi < oversold:
+            # Buy signal - RSI below oversold threshold
+            # More aggressive scale factor calculation (starts higher, scales faster)
+            rsi_scale_factor = max(0.3, min(1.0, (oversold - rsi) / (oversold - 15)))
+            
+            if len(order_depth.sell_orders) > 0 and available_to_buy > 0:
+                # Buy using the SELL side of the order book (best ask price)
+                best_ask_price = min(order_depth.sell_orders.keys())
+                best_ask_amount = -order_depth.sell_orders[best_ask_price]  # Convert negative to positive
+                
+                # Scale the amount based on RSI extremeness and available position - more aggressive
+                amount_to_trade = min(int(available_to_buy * rsi_scale_factor) + 5, best_ask_amount)
+                
+                logger.print(f"RSI oversold: {rsi:.2f} (scale: {rsi_scale_factor:.2f}), buying {amount_to_trade} at {best_ask_price}")
+                return "BUY", amount_to_trade
+            else:
+                return "HOLD", 0
+                
+        elif rsi > overbought:
+            # Sell signal - RSI above overbought threshold
+            # More aggressive scale factor calculation (starts higher, scales faster) 
+            rsi_scale_factor = max(0.3, min(1.0, (rsi - overbought) / (85 - overbought)))
+            
+            if len(order_depth.buy_orders) > 0 and available_to_sell > 0:
+                # Sell using the BUY side of the order book (best bid price)
+                best_bid_price = max(order_depth.buy_orders.keys())
+                best_bid_amount = order_depth.buy_orders[best_bid_price]
+                
+                # Scale the amount based on RSI extremeness and available position - more aggressive
+                amount_to_trade = min(int(available_to_sell * rsi_scale_factor) + 5, best_bid_amount)
+                
+                logger.print(f"RSI overbought: {rsi:.2f} (scale: {rsi_scale_factor:.2f}), selling {amount_to_trade} at {best_bid_price}")
+                return "SELL", amount_to_trade
+            else:
+                return "HOLD", 0
+        else:
+            logger.print(f"RSI neutral: {rsi:.2f}, holding")
             return "HOLD", 0
         
     def calculate_mid_price(self, order_depth: OrderDepth):
@@ -572,34 +666,31 @@ class Trader:
                     result[product] = orders
             elif product == "SQUID_INK":
                 price_data = self.historical_data.get(product, None)
-                # fair_value = self.calculate_kelp_price(order_depth)
-                # if fair_value is not None:
-                if price_data is not None:
+                if price_data is not None and len(price_data) > 0:
                     # Initialize tracking variables
-                    position = state.position.get(product,0)
+                    self.positions[product] = state.position.get(product, 0)
+                    position = self.positions[product]
                     position_limit = self.position_limits[product]
-                    buy_limit = position_limit - position
-                    sell_limit = -position_limit - position  # negative limit
-                    bought_amount, sold_amount = 0, 0
-                    left_to_buy = buy_limit - bought_amount
-                    left_to_sell = sold_amount - sell_limit
                     
-                    indicator, amount_to_trade = self.bollinger_band(price_data['mid_price'], order_depth)
-                    if indicator == "BUY":
-                        if position < self.position_limits[product]:
-                            best_ask_price, best_ask_amount = list(order_depth.sell_orders.items())[0] 
-                            orders.append(Order(product, best_ask_price, best_ask_amount))
-                            logger.print("BUY SQUID_INK", str(amount_to_trade) + "x", price_data['mid_price'].iloc[-1])
-                            position += amount_to_trade
-                            bought_amount += amount_to_trade
-                    elif indicator == "SELL":
-                        if position > -self.position_limits[product]:
-                            best_bid_price, best_bid_amount = list(order_depth.buy_orders.items())[0]
-                            orders.append(Order(product, best_bid_price, -best_bid_amount))
-                            logger.print("SELL SQUID_INK", str(amount_to_trade) + "x", price_data['mid_price'].iloc[-1])
-                            position -= amount_to_trade
-                            sold_amount -= amount_to_trade
-
+                    # Get RSI trading signal
+                    indicator, amount_to_trade = self.rsi_strategy(price_data['mid_price'], order_depth)
+                    
+                    if indicator == "BUY" and amount_to_trade > 0:
+                        if position < self.position_limits[product] and len(order_depth.sell_orders) > 0:
+                            # Get best ask price
+                            best_ask_price = min(order_depth.sell_orders.keys())
+                            # Use the calculated amount_to_trade directly
+                            orders.append(Order(product, best_ask_price, amount_to_trade))
+                            logger.print(f"BUY SQUID_INK {amount_to_trade}x at {best_ask_price}")
+                    
+                    elif indicator == "SELL" and amount_to_trade > 0:
+                        if position > -self.position_limits[product] and len(order_depth.buy_orders) > 0:
+                            # Get best bid price
+                            best_bid_price = max(order_depth.buy_orders.keys())
+                            # Use the calculated amount_to_trade directly
+                            orders.append(Order(product, best_bid_price, -amount_to_trade))
+                            logger.print(f"SELL SQUID_INK {amount_to_trade}x at {best_bid_price}")
+                    
                     # Add orders to result
                     result[product] = orders
                     
