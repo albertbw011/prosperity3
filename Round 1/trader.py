@@ -3,10 +3,10 @@ from typing import Any, List
 import numpy as np
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
 import math
-import pandas as pd
 import _pickle as cPickle
 import io
 import base64
+import os
 
 class Logger:
     def __init__(self) -> None:
@@ -171,14 +171,14 @@ class Trader:
             return mmmid_price
         return None
     
-    def bollinger_band(self, prices: pd.Series, order_depth: OrderDepth, window=50, num_std=2):
+    def bollinger_band(self, prices: list, order_depth: OrderDepth, window=50, num_std=2):
         """Calculate Bollinger Bands and generate trading signals"""
         # Check if we have enough data
         if len(prices) < 1:
             return "HOLD", 0
         
-        # Get the most recent price (last row)
-        current_price = prices.iloc[-1]
+        # Get the most recent price (last element)
+        current_price = prices[-1]
         
         # If we don't have enough data for the window, use all available data
         actual_window = min(window, len(prices))
@@ -186,7 +186,7 @@ class Trader:
             return "HOLD", 0
         
         # Calculate moving average and standard deviation
-        recent_prices = prices.iloc[-actual_window:]
+        recent_prices = prices[-actual_window:]
         ma = np.mean(recent_prices)
         std = np.std(recent_prices)
         
@@ -214,7 +214,7 @@ class Trader:
         else:
             return "HOLD", 0
         
-    def calculate_rsi(self, prices: pd.Series, period=30):
+    def calculate_rsi(self, prices: list, period=30):
         """Calculate RSI with proper handling for edge cases"""
         # Check if we have enough data
         if len(prices) < period + 1:
@@ -246,7 +246,7 @@ class Trader:
         
         return rsi
     
-    def rsi_strategy(self, prices: pd.Series, order_depth: OrderDepth, period=25, oversold=32, overbought=68):
+    def rsi_strategy(self, prices: list, order_depth: OrderDepth, period=25, oversold=32, overbought=68):
         """RSI strategy optimized for small position limits - more aggressive settings"""
         # Only calculate RSI if we have sufficient data
         if len(prices) < period + 1:
@@ -256,7 +256,7 @@ class Trader:
         rsi = self.calculate_rsi(prices, period)
         
         # Handle invalid RSI values
-        if rsi is None or pd.isna(rsi):
+        if rsi is None or np.isnan(rsi):
             logger.print("RSI calculation returned invalid value")
             return "HOLD", 0
         
@@ -272,7 +272,7 @@ class Trader:
         if rsi < oversold:
             # Buy signal - RSI below oversold threshold
             # More aggressive scale factor calculation (starts higher, scales faster)
-            rsi_scale_factor = max(0.3, min(1.0, (oversold - rsi) / (oversold - 10)))
+            rsi_scale_factor = max(float(os.environ.get('AGGRESSION_FACTOR')), min(1.0, (oversold - rsi) / (oversold - int(os.environ.get('LOW_BUY')))))
             
             if len(order_depth.sell_orders) > 0 and available_to_buy > 0:
                 # Buy using the SELL side of the order book (best ask price)
@@ -280,7 +280,7 @@ class Trader:
                 best_ask_amount = -order_depth.sell_orders[best_ask_price]  # Convert negative to positive
                 
                 # Scale the amount based on RSI extremeness and available position - more aggressive
-                amount_to_trade = min(int(available_to_buy * rsi_scale_factor) + 10, best_ask_amount)
+                amount_to_trade = min(int(available_to_buy * rsi_scale_factor) + int(os.environ.get('BUY_AMOUNT')), best_ask_amount)
                 
                 logger.print(f"RSI oversold: {rsi:.2f} (scale: {rsi_scale_factor:.2f}), buying {amount_to_trade} at {best_ask_price}")
                 return "BUY", amount_to_trade
@@ -290,7 +290,7 @@ class Trader:
         elif rsi > overbought:
             # Sell signal - RSI above overbought threshold
             # More aggressive scale factor calculation (starts higher, scales faster) 
-            rsi_scale_factor = max(0.3, min(1.0, (rsi - overbought) / (90 - overbought)))
+            rsi_scale_factor = max(float(os.environ.get('AGGRESSION_FACTOR')), min(1.0, (rsi - overbought) / (int(os.environ.get('HIGH_SELL')) - overbought)))
             
             if len(order_depth.buy_orders) > 0 and available_to_sell > 0:
                 # Sell using the BUY side of the order book (best bid price)
@@ -298,7 +298,7 @@ class Trader:
                 best_bid_amount = order_depth.buy_orders[best_bid_price]
                 
                 # Scale the amount based on RSI extremeness and available position - more aggressive
-                amount_to_trade = min(int(available_to_sell * rsi_scale_factor) + 10, best_bid_amount)
+                amount_to_trade = min(int(available_to_sell * rsi_scale_factor) + int(os.environ.get('BUY_AMOUNT')), best_bid_amount)
 
                 logger.print(f"RSI overbought: {rsi:.2f} (scale: {rsi_scale_factor:.2f}), selling {amount_to_trade} at {best_bid_price}")
                 return "SELL", amount_to_trade
@@ -325,12 +325,11 @@ class Trader:
         
         # Check if product exists in historical_data and initialize if needed
         if self.historical_data[product] is None:
-            # Initialize with a DataFrame containing a mid_price column
-            self.historical_data[product] = pd.DataFrame({'mid_price': [price_value]})
+            # Initialize with a dictionary containing a mid_price array
+            self.historical_data[product] = {'mid_price': [price_value]}
         else:
-            # Add new row to existing DataFrame
-            new_row = pd.DataFrame({'mid_price': [price_value]})
-            self.historical_data[product] = pd.concat([self.historical_data[product], new_row], ignore_index=True)
+            # Append new price to existing array
+            self.historical_data[product]['mid_price'].append(price_value)
         
         return None
     
@@ -589,8 +588,6 @@ class Trader:
                     buy_adjustment = round(abs(inventory_ratio) * adjustment_factor * current_spread)
                     # Ensure we maintain minimum spread and don't cross market
                     buy_price = min(base_sell_price - min_spread, base_buy_price + buy_adjustment)
-                else:
-                    buy_price = base_buy_price
                     
                 orders.append(Order(product, buy_price, left_to_buy))
                 orders.append(Order(product, sell_price, -left_to_sell))"""
@@ -666,15 +663,25 @@ class Trader:
                     result[product] = orders
             elif product == "SQUID_INK":
                 price_data = self.historical_data.get(product, None)
-                if price_data is not None and len(price_data) > 0:
+                if price_data is not None and len(price_data.get('mid_price', [])) > 0:
                     # Initialize tracking variables
                     self.positions[product] = state.position.get(product, 0)
                     position = self.positions[product]
                     position_limit = self.position_limits[product]
                     
+                    # Parse period from environment variable if available
+                    period = 25
+                    if os.environ.get('PERIOD') is not None:
+                        try:
+                            period = int(os.environ.get('PERIOD'))
+                        except (ValueError, TypeError):
+                            pass
+                    
                     # Get RSI trading signal
-                    indicator, amount_to_trade = self.rsi_strategy(price_data['mid_price'], order_depth,
-                                                                   period=50, oversold=30, overbought=70)
+                    indicator, amount_to_trade = self.rsi_strategy(price_data['mid_price'], order_depth, 
+                                                                   period=int(os.environ.get('PERIOD')),
+                                                                    oversold=int(os.environ.get('OVERSOLD')),
+                                                                    overbought=int(os.environ.get('OVERBOUGHT')))
                     
                     if indicator == "BUY" and amount_to_trade > 0:
                         if position < self.position_limits[product] and len(order_depth.sell_orders) > 0:
@@ -726,4 +733,3 @@ class Trader:
         conversions = 1
         logger.flush(state, result, conversions, traderData)
         return result, conversions, traderData
-    
